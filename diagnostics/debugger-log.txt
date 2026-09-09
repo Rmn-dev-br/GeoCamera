@@ -1,0 +1,4 @@
+--------- beginning of main
+09-07 15:49:31.108  4996  4996 W monodroid-debug: Trying to initialize the debugger with options: --debugger-agent=transport=dt_socket,loglevel=0,address=10.0.2.2:56822,embedding=1,timeout=30000
+09-07 17:39:12.737  9584  9584 W monodroid-debug: Trying to initialize the debugger with options: --debugger-agent=transport=dt_socket,loglevel=0,address=10.0.2.2:59405,embedding=1,timeout=30000
+09-07 17:43:29.170  9660  9660 W monodroid-debug: Not starting the debugger as the timeout value has been reached; current-time: 1788813809; timeout: 1788813581
