@@ -1,4 +1,8 @@
 using System.Globalization;
+#if ANDROID
+using Android.Content;
+using Android.Provider;
+#endif
 
 namespace GeoCamera;
 
@@ -65,6 +69,7 @@ public partial class MainPage : ContentPage
             microphone = await Permissions.RequestAsync<Permissions.Microphone>() == PermissionStatus.Granted;
             if (!active) return;
             Preview.StartPreview();
+            OnPreviewSizeChanged(this, EventArgs.Empty);
             RecordButton.IsEnabled = true;
             UpdateReadyStatus();
             locationCancellation = new CancellationTokenSource();
@@ -150,11 +155,13 @@ public partial class MainPage : ContentPage
     {
         var action = await DisplayActionSheetAsync("Configurações", "Fechar", null,
             "Modo: vídeo/foto",
+            $"Resolução: {GetResolutionLabel()}",
             $"Mostrar data: {(showDate ? "ligado" : "desligado")}",
             $"Mostrar hora: {(showTime ? "ligado" : "desligado")}",
             $"Formato coordenadas: {(coordinateFormat == CoordinateFormat.DecimalDegrees ? "decimal" : "graus/min/seg")}");
 
         if (action == "Modo: vídeo/foto") await SelectCaptureModeAsync();
+        else if (action.StartsWith("Resolução", StringComparison.Ordinal)) await SelectResolutionAsync();
         else if (action.StartsWith("Mostrar data", StringComparison.Ordinal)) showDate = !showDate;
         else if (action.StartsWith("Mostrar hora", StringComparison.Ordinal)) showTime = !showTime;
         else if (action.StartsWith("Formato coordenadas", StringComparison.Ordinal)) await SelectCoordinateFormatAsync();
@@ -175,6 +182,41 @@ public partial class MainPage : ContentPage
         var selected = await DisplayActionSheetAsync("Formato de coordenadas", "Cancelar", null, "Decimal", "Graus/Min/Seg");
         if (selected == "Decimal") coordinateFormat = CoordinateFormat.DecimalDegrees;
         else if (selected == "Graus/Min/Seg") coordinateFormat = CoordinateFormat.DegreesMinutesSeconds;
+    }
+
+    string GetResolutionLabel()
+    {
+        var resolution = Preview.GetCaptureResolution();
+        return resolution.Width > 0 && resolution.Height > 0 ? resolution.ToString() : "padrão";
+    }
+
+    async Task SelectResolutionAsync()
+    {
+        if (Preview.IsRecording)
+        {
+            await DisplayAlertAsync("Configurações", "Pare a gravação antes de alterar a resolução.", "OK");
+            return;
+        }
+
+        var available = Preview.GetSupportedResolutions();
+        if (available.Count == 0)
+        {
+            await DisplayAlertAsync("Configurações", "Resoluções indisponíveis no momento. Aguarde a câmera iniciar.", "OK");
+            return;
+        }
+
+        var current = Preview.GetCaptureResolution();
+        var options = available.Select(x => x.Equals(current) ? $"{x} ✓" : x.ToString()).ToArray();
+        var selected = await DisplayActionSheetAsync("Resolução de captura", "Cancelar", null, options);
+        if (string.IsNullOrWhiteSpace(selected) || selected == "Cancelar") return;
+
+        var choiceText = selected.Replace(" ✓", string.Empty, StringComparison.Ordinal);
+        var resolution = available.FirstOrDefault(x => x.ToString() == choiceText);
+        if (resolution.Width <= 0 || resolution.Height <= 0) return;
+
+        Preview.SetCaptureResolution(resolution);
+        OnPreviewSizeChanged(this, EventArgs.Empty);
+        StatusLabel.Text = $"Resolução ativa: {resolution}";
     }
 
     void UpdateReadyStatus()
@@ -218,7 +260,7 @@ public partial class MainPage : ContentPage
             }
         }
         catch (Exception ex) { await DisplayAlertAsync("Captura", ex.Message, "OK"); }
-        finally { busy = false; RecordButton.IsEnabled = active && !Preview.IsRecording; }
+        finally { busy = false; RecordButton.IsEnabled = active; }
     }
 
     async Task CapturePictureAsync()
@@ -260,31 +302,127 @@ public partial class MainPage : ContentPage
 
     void OnPreviewSizeChanged(object? sender, EventArgs e)
     {
-        var width = Math.Min(PreviewBox.Width, PreviewBox.Height * 3 / 4);
+        var resolution = Preview.GetCaptureResolution();
+        var widthToHeight = resolution.Width > 0 && resolution.Height > 0
+            ? (double)resolution.Height / resolution.Width
+            : 3.0 / 4.0;
+
+        var width = Math.Min(PreviewBox.Width, PreviewBox.Height * widthToHeight);
         if (width <= 0) return;
+
         Preview.WidthRequest = width;
-        Preview.HeightRequest = width * 4 / 3;
+        Preview.HeightRequest = width / widthToHeight;
     }
 
     async void OnFilesClicked(object? sender, EventArgs e)
     {
         try
         {
-            var files = Directory.EnumerateFiles(RecordingsDirectory)
+            var items = new List<CaptureItem>();
+
+            items.AddRange(Directory.EnumerateFiles(RecordingsDirectory)
                 .Where(x => x.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) || x.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(x => x)
+                .Select(x =>
+                {
+                    var isVideo = x.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase);
+                    return new CaptureItem(
+                        DisplayName: Path.GetFileName(x),
+                        SortKey: File.GetLastWriteTimeUtc(x),
+                        LocalPath: x,
+                        ContentUri: null,
+                        MimeType: isVideo ? "video/mp4" : "image/png",
+                        Title: isVideo ? "Vídeo" : "Foto");
+                }));
+
+#if ANDROID
+            items.AddRange(GetAndroidSharedVideos());
+#endif
+
+            var ordered = items
+                .OrderByDescending(x => x.SortKey)
                 .ToArray();
-            if (files.Length == 0) { await DisplayAlertAsync("Capturas", "Nenhum arquivo salvo ainda.", "OK"); return; }
-            var selected = await DisplayActionSheetAsync("Capturas", "Cancelar", null, files.Select(x => Path.GetFileName(x)).ToArray());
-            var path = files.FirstOrDefault(x => Path.GetFileName(x) == selected);
-            if (path is null) return;
-            var isVideo = path.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase);
-            var mimeType = isVideo ? "video/mp4" : "image/png";
-            var title = isVideo ? "Vídeo" : "Foto";
-            var action = await DisplayActionSheetAsync(selected, "Cancelar", null, "Abrir", "Compartilhar / salvar cópia");
-            if (action == "Abrir") await Launcher.OpenAsync(new OpenFileRequest(title, new ReadOnlyFile(path, mimeType)));
-            else if (action == "Compartilhar / salvar cópia") await Share.RequestAsync(new ShareFileRequest($"{title} GeoCamera", new ShareFile(path, mimeType)));
+
+            if (ordered.Length == 0)
+            {
+                await DisplayAlertAsync("Capturas", "Nenhum arquivo salvo ainda.", "OK");
+                return;
+            }
+
+            var selected = await DisplayActionSheetAsync("Capturas", "Cancelar", null, ordered.Select(x => x.DisplayName).ToArray());
+            var item = ordered.FirstOrDefault(x => x.DisplayName == selected);
+            if (item is null) return;
+
+            var actions = item.LocalPath is not null
+                ? new[] { "Abrir", "Compartilhar / salvar cópia" }
+                : new[] { "Abrir" };
+
+            var action = await DisplayActionSheetAsync(selected, "Cancelar", null, actions);
+            if (action != "Abrir" && action != "Compartilhar / salvar cópia") return;
+
+            if (action == "Abrir")
+            {
+                if (item.LocalPath is not null)
+                    await Launcher.OpenAsync(new OpenFileRequest(item.Title, new ReadOnlyFile(item.LocalPath, item.MimeType)));
+                else if (item.ContentUri is not null)
+                    await Launcher.OpenAsync(item.ContentUri);
+            }
+            else if (item.LocalPath is not null)
+            {
+                await Share.RequestAsync(new ShareFileRequest($"{item.Title} GeoCamera", new ShareFile(item.LocalPath, item.MimeType)));
+            }
         }
         catch (Exception ex) { await DisplayAlertAsync("Capturas", ex.Message, "OK"); }
     }
+
+    sealed record CaptureItem(
+        string DisplayName,
+        DateTime SortKey,
+        string? LocalPath,
+        Uri? ContentUri,
+        string MimeType,
+        string Title);
+
+#if ANDROID
+    static IEnumerable<CaptureItem> GetAndroidSharedVideos()
+    {
+        var result = new List<CaptureItem>();
+        var context = Android.App.Application.Context;
+        var resolver = context.ContentResolver;
+        if (resolver is null) return result;
+
+        string[] projection =
+        [
+            BaseColumns.Id,
+            MediaStore.IMediaColumns.DisplayName!,
+            MediaStore.IMediaColumns.DateAdded!,
+            MediaStore.IMediaColumns.RelativePath!
+        ];
+
+        using var cursor = resolver.Query(
+            MediaStore.Video.Media.ExternalContentUri,
+            projection,
+            $"{MediaStore.IMediaColumns.RelativePath}=?",
+            new[] { "Movies/GeoCamera/" },
+            $"{MediaStore.IMediaColumns.DateAdded} DESC");
+
+        if (cursor is null) return result;
+
+        var idIndex = cursor.GetColumnIndexOrThrow(BaseColumns.Id);
+        var nameIndex = cursor.GetColumnIndexOrThrow(MediaStore.IMediaColumns.DisplayName);
+        var dateIndex = cursor.GetColumnIndexOrThrow(MediaStore.IMediaColumns.DateAdded);
+
+        while (cursor.MoveToNext())
+        {
+            var id = cursor.GetLong(idIndex);
+            var name = cursor.GetString(nameIndex) ?? $"Video_{id}.mp4";
+            var seconds = cursor.GetLong(dateIndex);
+            var date = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
+            var uri = ContentUris.WithAppendedId(MediaStore.Video.Media.ExternalContentUri!, id);
+            result.Add(new CaptureItem(name, date, null, new Uri(uri!.ToString()!), "video/mp4", "Vídeo"));
+        }
+
+        return result;
+    }
+#endif
 }

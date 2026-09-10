@@ -13,6 +13,14 @@ public sealed class CameraPreview : View
     public void StartRecording(string path, bool audio) => NativeHandler.PlatformView.StartRecording(path, audio);
     public string? StopRecording() => NativeHandler.PlatformView.StopRecording();
     public void CapturePhoto(string path) => NativeHandler.PlatformView.CapturePhoto(path);
+    public IReadOnlyList<CameraResolution> GetSupportedResolutions() =>
+        Handler is Platforms.Android.CameraPreviewHandler h ? h.PlatformView.GetSupportedResolutions() : Array.Empty<CameraResolution>();
+    public CameraResolution GetCaptureResolution() =>
+        Handler is Platforms.Android.CameraPreviewHandler h ? h.PlatformView.CaptureResolution : default;
+    public void SetCaptureResolution(CameraResolution resolution)
+    {
+        if (Handler is Platforms.Android.CameraPreviewHandler h) h.PlatformView.SetCaptureResolution(resolution);
+    }
 #else
     public bool IsRecording => false;
     public void StartPreview() => throw new PlatformNotSupportedException("Use este aplicativo em um telefone Android.");
@@ -20,5 +28,8 @@ public sealed class CameraPreview : View
     public void StartRecording(string path, bool audio) => throw new PlatformNotSupportedException();
     public string? StopRecording() => null;
     public void CapturePhoto(string path) => throw new PlatformNotSupportedException();
+    public IReadOnlyList<CameraResolution> GetSupportedResolutions() => Array.Empty<CameraResolution>();
+    public CameraResolution GetCaptureResolution() => default;
+    public void SetCaptureResolution(CameraResolution resolution) => throw new PlatformNotSupportedException();
 #endif
 }
