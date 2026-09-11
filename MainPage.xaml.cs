@@ -270,8 +270,11 @@ public partial class MainPage : ContentPage
             ? (double)resolution.Width / resolution.Height
             : 4.0 / 3.0;
 
-        var width = Math.Min(PreviewBox.Width, PreviewBox.Height * widthToHeight);
-        if (width <= 0) return;
+        if (PreviewBox.Width <= 0 || PreviewBox.Height <= 0) return;
+
+        // Cover the whole preview area (crop overflow) so the camera fills the
+        // entire display, like a standard camera app.
+        var width = Math.Max(PreviewBox.Width, PreviewBox.Height * widthToHeight);
 
         Preview.WidthRequest = width;
         Preview.HeightRequest = width / widthToHeight;
