@@ -4,7 +4,6 @@ using Android.Media;
 using Android.Provider;
 using Android.Views;
 using Microsoft.Maui.Handlers;
-using Microsoft.Maui.Storage;
 using Camera = Android.Hardware.Camera;
 using CameraFacing = Android.Hardware.CameraFacing;
 using Paint = Android.Graphics.Paint;
@@ -27,8 +26,6 @@ public sealed class CameraPreviewHandler : ViewHandler<CameraPreview, RecordingT
 #pragma warning disable CS0618
 public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceTextureListener
 {
-    const string ResolutionPreferenceKey = "camera.capture.resolution";
-
     readonly CameraPreview owner;
     Camera? camera;
     MediaRecorder? recorder;
@@ -41,8 +38,7 @@ public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceText
     bool requested, hasFrame;
     int frameCount;
     long lastPreviewFrame;
-    List<CameraResolution> supportedResolutions = [];
-    CameraResolution captureResolution = new(640, 480);
+    CameraResolution captureResolution = new(1280, 720);
 
     public bool IsRecording => recorder is not null;
     public CameraResolution CaptureResolution => captureResolution;
@@ -53,20 +49,11 @@ public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceText
         SurfaceTextureListener = this;
     }
 
-    public IReadOnlyList<CameraResolution> GetSupportedResolutions() => supportedResolutions;
+    public IReadOnlyList<CameraResolution> GetSupportedResolutions() => [captureResolution];
 
     public void SetCaptureResolution(CameraResolution resolution)
     {
-        if (resolution.Width <= 0 || resolution.Height <= 0) return;
-
-        captureResolution = resolution;
-        Preferences.Default.Set(ResolutionPreferenceKey, SerializeResolution(captureResolution));
-
-        if (camera is null || IsRecording) return;
-
-        var shouldResume = requested;
-        StopPreview();
-        if (shouldResume) StartPreview();
+        // Resolution selection is intentionally disabled.
     }
 
     public void StartPreview()
@@ -77,29 +64,28 @@ public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceText
         try
         {
             var info = new Camera.CameraInfo();
-            var id = FindPreferredCameraId(info);
-            if (id < 0) throw new InvalidOperationException("Nenhuma câmera disponível.");
+            var id = FindRearCameraId(info);
+            if (id < 0) throw new InvalidOperationException("Câmera traseira indisponível. Este aplicativo requer a câmera traseira.");
 
-            camera = Camera.Open(id) ?? throw new InvalidOperationException("Câmera indisponível.");
+            camera = Camera.Open(id) ?? throw new InvalidOperationException("Câmera traseira indisponível.");
             using var parameters = camera.GetParameters()!;
-            supportedResolutions = parameters.SupportedPreviewSizes!
-                .Select(x => new CameraResolution(x.Width, x.Height))
-                .Distinct()
-                .OrderByDescending(x => x.Width * x.Height)
-                .ThenByDescending(x => x.Width)
-                .ToList();
 
-            if (supportedResolutions.Count == 0)
-                throw new InvalidOperationException("A câmera não informou resoluções suportadas.");
+            // Use the resolution the rear camera actually reports (its largest supported
+            // preview size) so preview and saved video use the device's native resolution.
+            var cameraSize = SelectCameraResolution(parameters);
+            if (cameraSize is null)
+                throw new InvalidOperationException("A câmera não informou resolução.");
 
-            var preferred = GetPreferredResolution(supportedResolutions[0]);
-            captureResolution = SelectClosestResolution(preferred, supportedResolutions);
+            captureResolution = new CameraResolution(cameraSize.Width, cameraSize.Height);
 
-            parameters.SetPreviewSize(captureResolution.Width, captureResolution.Height);
+            parameters.SetPreviewSize(cameraSize.Width, cameraSize.Height);
             if (parameters.SupportedFocusModes?.Contains(Camera.Parameters.FocusModeContinuousVideo) == true)
                 parameters.FocusMode = Camera.Parameters.FocusModeContinuousVideo;
             camera.SetParameters(parameters);
-            camera.SetDisplayOrientation(info.Orientation);
+            camera.SetDisplayOrientation(GetDisplayOrientation(info));
+            // Match the preview surface buffer to the camera size so the landscape
+            // frame fills the texture instead of rendering black or distorted.
+            SurfaceTexture?.SetDefaultBufferSize(cameraSize.Width, cameraSize.Height);
             camera.SetPreviewTexture(SurfaceTexture);
             camera.StartPreview();
         }
@@ -136,11 +122,12 @@ public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceText
             recorder = OperatingSystem.IsAndroidVersionAtLeast(31) ? new MediaRecorder(Context!) : new MediaRecorder();
             if (audio) recorder.SetAudioSource(AudioSource.Mic);
             recorder.SetVideoSource(VideoSource.Surface);
+            var outputResolution = GetLandscapeOutputResolution();
             recorder.SetOutputFormat(OutputFormat.Mpeg4);
             recorder.SetVideoEncoder(VideoEncoder.H264);
-            recorder.SetVideoSize(captureResolution.Width, captureResolution.Height);
+            recorder.SetVideoSize(outputResolution.Width, outputResolution.Height);
             recorder.SetVideoFrameRate(15);
-            recorder.SetVideoEncodingBitRate(GetVideoBitrate(captureResolution));
+            recorder.SetVideoEncodingBitRate(GetVideoBitrate(outputResolution));
             if (audio)
             {
                 recorder.SetAudioEncoder(AudioEncoder.Aac);
@@ -150,8 +137,8 @@ public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceText
 
             recorder.SetOutputFile(outputDescriptor.FileDescriptor);
             recorder.Prepare();
-            renderer = new VideoSurfaceRenderer(recorder.Surface!, captureResolution.Width, captureResolution.Height);
-            frame = Bitmap.CreateBitmap(captureResolution.Width, captureResolution.Height, Bitmap.Config.Argb8888!)!;
+            renderer = new VideoSurfaceRenderer(recorder.Surface!, outputResolution.Width, outputResolution.Height);
+            frame = Bitmap.CreateBitmap(outputResolution.Width, outputResolution.Height, Bitmap.Config.Argb8888!)!;
             recorder.Error += OnRecorderError;
             recorder.Start();
             RenderFrame();
@@ -175,11 +162,12 @@ public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceText
         if (camera is null || !hasFrame || !IsAvailable)
             throw new InvalidOperationException("Aguarde a imagem da câmera e tente novamente.");
 
-        using var bitmap = Bitmap.CreateBitmap(captureResolution.Width, captureResolution.Height, Bitmap.Config.Argb8888!)!;
+        var outputResolution = GetLandscapeOutputResolution();
+        using var bitmap = Bitmap.CreateBitmap(outputResolution.Width, outputResolution.Height, Bitmap.Config.Argb8888!)!;
         if (GetBitmap(bitmap) is null) throw new InvalidOperationException("Imagem da câmera indisponível.");
 
         using var canvas = new Canvas(bitmap);
-        DrawOverlay(canvas, captureResolution.Width, captureResolution.Height, owner.OverlayText);
+        DrawOverlay(canvas, outputResolution.Width, outputResolution.Height, owner.OverlayText);
 
         using var stream = System.IO.File.Create(path);
         if (!bitmap.Compress(Bitmap.CompressFormat.Png!, 100, stream))
@@ -204,7 +192,7 @@ public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceText
         // submitted to the encoder, independent of the MAUI preview label.
         if (GetBitmap(frame) is null) throw new InvalidOperationException("Imagem da câmera indisponível.");
         using var canvas = new Canvas(frame);
-        DrawOverlay(canvas, captureResolution.Width, captureResolution.Height, owner.OverlayText);
+        DrawOverlay(canvas, frame.Width, frame.Height, owner.OverlayText);
         renderer.Draw(frame);
         frameCount++;
     }
@@ -213,14 +201,24 @@ public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceText
     {
         using var paint = new Paint(PaintFlags.AntiAlias);
         var lines = overlayText.Split('\n');
-        const int lineHeight = 26;
-        var top = height - (lines.Length * lineHeight + 20);
+
+        var textSize = Math.Clamp((float)(height * 0.012), 8f, 14f);
+        var lineHeight = textSize * 1.2f;
+        var verticalPadding = Math.Max(2f, textSize * 0.3f);
+        var horizontalPadding = Math.Max(4f, textSize * 0.5f);
+        var boxHeight = lines.Length * lineHeight + verticalPadding * 2;
+        var top = height - boxHeight;
+
         paint.Color = global::Android.Graphics.Color.Black;
         canvas.DrawRect(0, top, width, height, paint);
+
         paint.Color = global::Android.Graphics.Color.White;
-        paint.TextSize = 20;
+        paint.TextSize = textSize;
         paint.SetTypeface(Typeface.Monospace);
-        for (var i = 0; i < lines.Length; i++) canvas.DrawText(lines[i], 10, top + 28 + i * lineHeight, paint);
+
+        var baseline = top + verticalPadding + textSize;
+        for (var i = 0; i < lines.Length; i++)
+            canvas.DrawText(lines[i], horizontalPadding, baseline + i * lineHeight, paint);
     }
 
     public string? StopRecording()
@@ -327,54 +325,58 @@ public sealed class RecordingTextureView : TextureView, TextureView.ISurfaceText
         catch { }
     }
 
-    static string SerializeResolution(CameraResolution resolution) => $"{resolution.Width}x{resolution.Height}";
-
-    static bool TryParseResolution(string? value, out CameraResolution resolution)
+    int GetDisplayOrientation(Camera.CameraInfo info)
     {
-        resolution = default;
-        if (string.IsNullOrWhiteSpace(value)) return false;
+        var rotation = Context?.Display?.Rotation ?? SurfaceOrientation.Rotation0;
+        var degrees = rotation switch
+        {
+            SurfaceOrientation.Rotation90 => 90,
+            SurfaceOrientation.Rotation180 => 180,
+            SurfaceOrientation.Rotation270 => 270,
+            _ => 0
+        };
 
-        var parts = value.Split('x');
-        if (parts.Length != 2) return false;
-        if (!int.TryParse(parts[0], out var width) || !int.TryParse(parts[1], out var height)) return false;
-        if (width <= 0 || height <= 0) return false;
+        if (info.Facing == CameraFacing.Front)
+        {
+            var result = (info.Orientation + degrees) % 360;
+            return (360 - result) % 360;
+        }
 
-        resolution = new CameraResolution(width, height);
-        return true;
+        return (info.Orientation - degrees + 360) % 360;
     }
 
-    static CameraResolution SelectClosestResolution(CameraResolution preferred, IReadOnlyList<CameraResolution> available)
+    CameraResolution GetLandscapeOutputResolution()
     {
-        if (available.Count == 0) return preferred;
+        if (captureResolution.Width <= 0 || captureResolution.Height <= 0)
+            return new CameraResolution(1280, 720);
 
-        return available
-            .OrderBy(x => Math.Abs(x.Width - preferred.Width) + Math.Abs(x.Height - preferred.Height))
-            .ThenByDescending(x => x.Width * x.Height)
-            .First();
+        return captureResolution.Width >= captureResolution.Height
+            ? captureResolution
+            : new CameraResolution(captureResolution.Height, captureResolution.Width);
     }
 
-    CameraResolution GetPreferredResolution(CameraResolution fallback)
+    static Camera.Size? SelectCameraResolution(Camera.Parameters parameters)
     {
-        if (!TryParseResolution(Preferences.Default.Get(ResolutionPreferenceKey, string.Empty), out var saved))
-            return fallback;
+        // The camera's own preferred preview size is the resolution the device
+        // reports for this (rear) camera and is guaranteed to render correctly.
+        if (parameters.PreviewSize is { } preferred)
+            return preferred;
 
-        return saved;
+        var supported = parameters.SupportedPreviewSizes;
+        return supported is { Count: > 0 }
+            ? supported.OrderByDescending(s => (long)s.Width * s.Height).First()
+            : null;
     }
 
-    static int FindPreferredCameraId(Camera.CameraInfo info)
+    static int FindRearCameraId(Camera.CameraInfo info)
     {
-        var firstBack = -1;
-        var firstAny = -1;
-
         for (var i = 0; i < Camera.NumberOfCameras; i++)
         {
             Camera.GetCameraInfo(i, info);
-            if (firstAny < 0) firstAny = i;
-            if (info.Facing == CameraFacing.Front) return i;
-            if (firstBack < 0 && info.Facing == CameraFacing.Back) firstBack = i;
+            if (info.Facing == CameraFacing.Back) return i;
         }
 
-        return firstBack >= 0 ? firstBack : firstAny;
+        return -1;
     }
 }
 #pragma warning restore CS0618

@@ -155,13 +155,11 @@ public partial class MainPage : ContentPage
     {
         var action = await DisplayActionSheetAsync("Configurações", "Fechar", null,
             "Modo: vídeo/foto",
-            $"Resolução: {GetResolutionLabel()}",
             $"Mostrar data: {(showDate ? "ligado" : "desligado")}",
             $"Mostrar hora: {(showTime ? "ligado" : "desligado")}",
             $"Formato coordenadas: {(coordinateFormat == CoordinateFormat.DecimalDegrees ? "decimal" : "graus/min/seg")}");
 
         if (action == "Modo: vídeo/foto") await SelectCaptureModeAsync();
-        else if (action.StartsWith("Resolução", StringComparison.Ordinal)) await SelectResolutionAsync();
         else if (action.StartsWith("Mostrar data", StringComparison.Ordinal)) showDate = !showDate;
         else if (action.StartsWith("Mostrar hora", StringComparison.Ordinal)) showTime = !showTime;
         else if (action.StartsWith("Formato coordenadas", StringComparison.Ordinal)) await SelectCoordinateFormatAsync();
@@ -182,41 +180,6 @@ public partial class MainPage : ContentPage
         var selected = await DisplayActionSheetAsync("Formato de coordenadas", "Cancelar", null, "Decimal", "Graus/Min/Seg");
         if (selected == "Decimal") coordinateFormat = CoordinateFormat.DecimalDegrees;
         else if (selected == "Graus/Min/Seg") coordinateFormat = CoordinateFormat.DegreesMinutesSeconds;
-    }
-
-    string GetResolutionLabel()
-    {
-        var resolution = Preview.GetCaptureResolution();
-        return resolution.Width > 0 && resolution.Height > 0 ? resolution.ToString() : "padrão";
-    }
-
-    async Task SelectResolutionAsync()
-    {
-        if (Preview.IsRecording)
-        {
-            await DisplayAlertAsync("Configurações", "Pare a gravação antes de alterar a resolução.", "OK");
-            return;
-        }
-
-        var available = Preview.GetSupportedResolutions();
-        if (available.Count == 0)
-        {
-            await DisplayAlertAsync("Configurações", "Resoluções indisponíveis no momento. Aguarde a câmera iniciar.", "OK");
-            return;
-        }
-
-        var current = Preview.GetCaptureResolution();
-        var options = available.Select(x => x.Equals(current) ? $"{x} ✓" : x.ToString()).ToArray();
-        var selected = await DisplayActionSheetAsync("Resolução de captura", "Cancelar", null, options);
-        if (string.IsNullOrWhiteSpace(selected) || selected == "Cancelar") return;
-
-        var choiceText = selected.Replace(" ✓", string.Empty, StringComparison.Ordinal);
-        var resolution = available.FirstOrDefault(x => x.ToString() == choiceText);
-        if (resolution.Width <= 0 || resolution.Height <= 0) return;
-
-        Preview.SetCaptureResolution(resolution);
-        OnPreviewSizeChanged(this, EventArgs.Empty);
-        StatusLabel.Text = $"Resolução ativa: {resolution}";
     }
 
     void UpdateReadyStatus()
@@ -304,8 +267,8 @@ public partial class MainPage : ContentPage
     {
         var resolution = Preview.GetCaptureResolution();
         var widthToHeight = resolution.Width > 0 && resolution.Height > 0
-            ? (double)resolution.Height / resolution.Width
-            : 3.0 / 4.0;
+            ? (double)resolution.Width / resolution.Height
+            : 4.0 / 3.0;
 
         var width = Math.Min(PreviewBox.Width, PreviewBox.Height * widthToHeight);
         if (width <= 0) return;
